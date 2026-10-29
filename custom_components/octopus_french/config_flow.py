@@ -9,10 +9,12 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
+from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_ACCOUNT_NUMBER,
+    CONF_HOURLY_STATISTICS,
     CONF_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN_EXPIRY,
     DOMAIN,
@@ -38,6 +40,14 @@ class OctopusFrenchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.password: str = ""
         self.accounts: list = []
         self.api_client: OctopusFrenchApiClient | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> "OctopusFrenchOptionsFlow":
+        """Return the options flow."""
+        return OctopusFrenchOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -172,4 +182,25 @@ class OctopusFrenchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),  # pyright: ignore[reportArgumentType]
             errors=errors,
+        )
+
+
+class OctopusFrenchOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Handle the integration options."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the options."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(  # pyright: ignore[reportArgumentType]
+                    {vol.Required(CONF_HOURLY_STATISTICS, default=False): bool}
+                ),
+                self.config_entry.options,
+            ),
         )

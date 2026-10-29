@@ -11,10 +11,15 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_SCAN_INTERVAL, PREVIOUS_MONTH_OVERLAP_DAYS
+from .const import (
+    CONF_HOURLY_STATISTICS,
+    DEFAULT_SCAN_INTERVAL,
+    LOAD_CURVE_FREQUENCY,
+    PREVIOUS_MONTH_OVERLAP_DAYS,
+)
 from .octopus_french import OctopusAuthError, OctopusConnectionError
 from .repairs import async_update_issues
-from .utils import is_electricity_meter_active
+from .utils import is_electricity_meter_active, reading_local_day
 
 if TYPE_CHECKING:
     from .octopus_french import OctopusFrenchApiClient
@@ -44,6 +49,30 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
         self.api_client = api_client
         self.account_number = account_number
         self.statistics_importer: OctopusStatisticsImporter | None = None
+        # Courbe de charge par PRM, avec le dernier jour journalier qu'elle
+        # couvrait : Octopus ne publie qu'une fois par jour, inutile de
+        # recharger quelques milliers de demi-heures à chaque cycle.
+        self._load_curve_cache: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+
+    @property
+    def hourly_statistics(self) -> bool:
+        """Return whether statistics are spread hour by hour from the load curve."""
+        entry = self.config_entry
+        return bool(entry and entry.options.get(CONF_HOURLY_STATISTICS, False))
+
+    async def async_get_load_curve(
+        self, property_id: str, prm_id: str, start_at: str, end_at: str
+    ) -> list[dict[str, Any]]:
+        """Fetch the half-hourly load curve of a PRM."""
+        return await self.api_client.get_energy_readings(
+            property_id,
+            start_at,
+            end_at,
+            prm_id,
+            utility_type="electricity",
+            reading_frequency=LOAD_CURVE_FREQUENCY,
+            first=100,
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from API."""
@@ -100,7 +129,9 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
         date_end = now.isoformat()
         gas_start = (today_midnight - timedelta(days=365)).isoformat()
 
-        async def fetch_electricity_for_prm(prm_id: str) -> tuple[str, list, Any]:
+        async def fetch_electricity_for_prm(
+            prm_id: str,
+        ) -> tuple[str, list, Any, list[dict[str, Any]]]:
             try:
                 readings = await self.api_client.get_energy_readings(
                     property_id_by_prm.get(prm_id, account_id),
@@ -119,9 +150,43 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "Failed to fetch electricity data for PRM %s: %s", prm_id, err
                 )
-                return prm_id, [], None
-            else:
-                return prm_id, readings, index
+                return prm_id, [], None, []
+            load_curve = (
+                await fetch_load_curve(prm_id, readings)
+                if self.hourly_statistics
+                else []
+            )
+            return prm_id, readings, index, load_curve
+
+        async def fetch_load_curve(
+            prm_id: str, readings: list[dict[str, Any]]
+        ) -> list[dict[str, Any]]:
+            """Return the PRM's load curve, refetched only when a new day landed."""
+            latest_day = max((r.get("startAt") or "" for r in readings), default="")
+            cached = self._load_curve_cache.get(prm_id)
+            if cached and cached[0] == latest_day:
+                return cached[1]
+            try:
+                load_curve = await self.async_get_load_curve(
+                    property_id_by_prm.get(prm_id, account_id),
+                    prm_id,
+                    electricity_start,
+                    date_end,
+                )
+            except OctopusConnectionError as err:
+                _LOGGER.warning(
+                    "Failed to fetch load curve for PRM %s: %s", prm_id, err
+                )
+                return cached[1] if cached else []
+            # Tant que la courbe du dernier jour n'est pas publiée, ne pas la
+            # mettre en cache : elle sera redemandée au cycle suivant.
+            latest_local_day = reading_local_day(latest_day)
+            if any(
+                reading_local_day(r.get("startAt")) == latest_local_day
+                for r in load_curve
+            ):
+                self._load_curve_cache[prm_id] = (latest_day, load_curve)
+            return load_curve
 
         async def fetch_gas_for_pce(meter: dict[str, Any]) -> tuple[str, dict]:
             """Fetch a PCE's readings, trying sources in order of preference."""
@@ -203,8 +268,8 @@ class OctopusFrenchDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         account_data["electricity_by_prm"] = {
-            prm_id: {"readings": readings, "index": index}
-            for prm_id, readings, index in electricity_results
+            prm_id: {"readings": readings, "index": index, "load_curve": load_curve}
+            for prm_id, readings, index, load_curve in electricity_results
         }
         gas_by_pce = dict(gas_results)
         account_data["gas_by_pce"] = gas_by_pce

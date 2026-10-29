@@ -9,6 +9,7 @@ uniquement ceux du premier (bug de scoping mono-PRM).
 from __future__ import annotations
 
 from datetime import date, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -22,12 +23,15 @@ from custom_components.octopus_french.coordinator import (
 
 def _make_coordinator(
     account_data: dict[str, Any],
+    options: dict[str, Any] | None = None,
 ) -> OctopusFrenchDataUpdateCoordinator:
     """Instancie le coordinator sans passer par l'init lourd de DataUpdateCoordinator."""
     coordinator = OctopusFrenchDataUpdateCoordinator.__new__(
         OctopusFrenchDataUpdateCoordinator
     )
     coordinator.account_number = "ACC-123"
+    coordinator.config_entry = SimpleNamespace(options=options or {})
+    coordinator._load_curve_cache = {}
 
     api_client = AsyncMock()
     api_client.get_account_data.return_value = account_data
@@ -255,3 +259,70 @@ async def test_resiliated_but_powered_supply_point_is_kept() -> None:
     result = await coordinator._fetch_all_data()
 
     assert set(result["electricity_by_prm"]) == {"PRM_ALIM"}
+
+
+_ONE_PRM_ACCOUNT = {
+    "account_id": "ID-1",
+    "account_number": "ACC-123",
+    "supply_points": {
+        "electricity": [{"prm": "PRM_A", "distributorStatus": "SERVC"}],
+        "gas": [],
+    },
+    "agreements": [],
+    "ledgers": {},
+}
+
+
+def _frequencies(coordinator: OctopusFrenchDataUpdateCoordinator) -> list[str]:
+    return [
+        call.kwargs.get("reading_frequency")
+        for call in coordinator.api_client.get_energy_readings.call_args_list
+    ]
+
+
+async def test_load_curve_not_fetched_by_default() -> None:
+    """Sans l'option, aucune courbe de charge n'est demandée à l'API."""
+    coordinator = _make_coordinator(_ONE_PRM_ACCOUNT)
+    result = await coordinator._fetch_all_data()
+
+    assert _frequencies(coordinator) == ["DAY_INTERVAL"]
+    assert result["electricity_by_prm"]["PRM_A"]["load_curve"] == []
+
+
+async def test_load_curve_fetched_once_per_new_day() -> None:
+    """
+    Avec l'option, la courbe à la demi-heure est récupérée puis mise en cache.
+
+    Octopus ne publie qu'une fois par jour : tant que le dernier relevé
+    journalier ne change pas, la courbe n'est pas redemandée.
+    """
+    coordinator = _make_coordinator(
+        _ONE_PRM_ACCOUNT, options={"hourly_statistics": True}
+    )
+    first = await coordinator._fetch_all_data()
+    await coordinator._fetch_all_data()
+
+    assert _frequencies(coordinator) == [
+        "DAY_INTERVAL",
+        "THIRTY_MIN_INTERVAL",
+        "DAY_INTERVAL",
+    ]
+    assert first["electricity_by_prm"]["PRM_A"]["load_curve"][0]["prm"] == "PRM_A"
+
+
+async def test_load_curve_refetched_until_latest_day_published() -> None:
+    """Tant que la courbe du dernier jour manque, elle est redemandée au cycle suivant."""
+    coordinator = _make_coordinator(
+        _ONE_PRM_ACCOUNT, options={"hourly_statistics": True}
+    )
+
+    async def _readings(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        if kwargs.get("reading_frequency") == "THIRTY_MIN_INTERVAL":
+            return [{"startAt": "2026-04-30T12:00:00+00:00", "value": 1.0}]
+        return [{"startAt": "2026-05-02T12:00:00+00:00", "value": 5.0}]
+
+    coordinator.api_client.get_energy_readings.side_effect = _readings
+    await coordinator._fetch_all_data()
+    await coordinator._fetch_all_data()
+
+    assert _frequencies(coordinator).count("THIRTY_MIN_INTERVAL") == 2

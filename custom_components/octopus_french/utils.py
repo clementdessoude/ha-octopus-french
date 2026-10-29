@@ -790,3 +790,68 @@ def gas_month_total(gas_data: dict[str, Any], month: str) -> float:
         if day.strftime("%Y-%m") == month
     )
     return round(total, 2)
+
+
+def load_curve_by_day(
+    readings: list[dict[str, Any]],
+) -> dict[datetime, dict[datetime, float]]:
+    """Group load curve readings into UTC hours, keyed by local calendar day.
+
+    Hours are keyed in UTC so the repeated hour of the autumn DST change stays
+    two distinct hours (local wall-clock times would collide).
+    """
+    by_day: dict[datetime, dict[datetime, float]] = {}
+    for reading in readings:
+        start_at = reading.get("startAt")
+        value = reading.get("value")
+        if not start_at or value is None:
+            continue
+        try:
+            start = datetime.fromisoformat(start_at)
+            kwh = float(value)
+        except (ValueError, TypeError) as err:
+            _LOGGER.warning("Failed to parse load curve reading %s: %s", reading, err)
+            continue
+        day = reading_local_day(start_at)
+        if day is None:
+            continue
+        hour = dt_util.as_utc(start).replace(minute=0, second=0, microsecond=0)
+        hours = by_day.setdefault(day, {})
+        hours[hour] = hours.get(hour, 0.0) + kwh
+    return by_day
+
+
+def day_hours(day: datetime) -> list[datetime]:
+    """Return the UTC start of every hour of a local day (23, 24 or 25 hours)."""
+    hour = dt_util.as_utc(day)
+    end = dt_util.as_utc(day + timedelta(days=1))
+    hours: list[datetime] = []
+    while hour < end:
+        hours.append(hour)
+        hour += timedelta(hours=1)
+    return hours
+
+
+def spread_daily_over_hours(
+    daily_values: dict[datetime, float],
+    curve_by_day: dict[datetime, dict[datetime, float]],
+) -> dict[datetime, float]:
+    """Spread each daily value over its hours, following the day's load curve.
+
+    The daily value stays the reference (it carries the contract labels and the
+    API cost): the curve only gives its hourly shape, so each day sums back to
+    its daily value. A day without curve keeps its whole value on the first
+    hour, with explicit zeros for the other hours so that hourly rows imported
+    by an earlier pass are overwritten rather than counted twice.
+    """
+    hourly: dict[datetime, float] = {}
+    for day, value in daily_values.items():
+        hours = day_hours(day)
+        curve = curve_by_day.get(day) or {}
+        total = sum(curve.get(hour, 0.0) for hour in hours)
+        for hour in hours:
+            if total > 0:
+                hourly[hour] = value * curve.get(hour, 0.0) / total
+            else:
+                hourly[hour] = value if hour == hours[0] else 0.0
+    return hourly

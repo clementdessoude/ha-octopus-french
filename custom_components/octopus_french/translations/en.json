@@ -45,6 +45,19 @@
       "reauth_successful": "Re-authentication was successful"
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options",
+        "data": {
+          "hourly_statistics": "Hourly statistics (load curve)"
+        },
+        "data_description": {
+          "hourly_statistics": "Spread each day's consumption and cost hour by hour in the Energy dashboard, following the half-hourly load curve. Requires the load curve to be enabled in your Enedis account."
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "energy_base": {

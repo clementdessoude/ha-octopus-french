@@ -27,6 +27,10 @@ from custom_components.octopus_french.sensors.electricity import (
 from custom_components.octopus_french.statistics_import import (
     OctopusStatisticsImporter,
 )
+from custom_components.octopus_french.utils import (
+    load_curve_by_day,
+    spread_daily_over_hours,
+)
 
 PARIS = zoneinfo.ZoneInfo("Europe/Paris")
 STAT_ID = "octopus_french:PRM1_energy_peak_hours"
@@ -81,6 +85,7 @@ def _cost_reading(
 def _make_gas_importer(gas_data: dict[str, Any]) -> OctopusStatisticsImporter:
     """Importer monté sur un seul PCE, sans électricité."""
     coordinator = SimpleNamespace(
+        hourly_statistics=False,
         data={
             "electricity_by_prm": {},
             "agreements": [
@@ -92,7 +97,7 @@ def _make_gas_importer(gas_data: dict[str, Any]) -> OctopusStatisticsImporter:
             ],
             "gas_by_pce": {"12345678901234": gas_data},
             "supply_points": {"gas": [{"prm": "12345678901234"}]},
-        }
+        },
     )
     return OctopusStatisticsImporter(MagicMock(), coordinator)
 
@@ -154,12 +159,13 @@ def _make_importer(
 ) -> OctopusStatisticsImporter:
     """Instancier l'importer sur un coordinator.data minimal."""
     coordinator = SimpleNamespace(
+        hourly_statistics=False,
         data={
             "electricity_by_prm": {"PRM1": {"readings": readings}},
             "agreements": agreements or [],
             "gas": [],
             "supply_points": {"gas": []},
-        }
+        },
     )
     return OctopusStatisticsImporter(MagicMock(), coordinator)
 
@@ -708,6 +714,7 @@ def _make_recompute_importer(
     api_client = AsyncMock()
     api_client.get_energy_readings.return_value = readings
     coordinator = SimpleNamespace(
+        hourly_statistics=False,
         api_client=api_client,
         data={
             "account_id": "ACC1",
@@ -842,3 +849,136 @@ async def test_purge_without_ids_touches_nothing() -> None:
         await importer.async_purge_orphan_statistics([])
 
     executor.assert_not_called()
+
+
+# ─── Statistiques horaires (courbe de charge) ──────────────────────────────────
+
+
+def _curve(day: str, values: dict[int, float], offset: str = "+02:00") -> list[dict]:
+    """Courbe à la demi-heure : chaque heure locale `h` vaut `values[h]` kWh."""
+    readings: list[dict] = []
+    for hour, kwh in values.items():
+        for minute in (0, 30):
+            readings.append(
+                {
+                    "startAt": f"{day}T{hour:02d}:{minute:02d}:00{offset}",
+                    "value": kwh / 2,
+                }
+            )
+    return readings
+
+
+def _make_hourly_importer(
+    readings: list[dict], load_curve: list[dict]
+) -> OctopusStatisticsImporter:
+    """Importer en mode horaire, avec la courbe de charge du PRM1."""
+    coordinator = SimpleNamespace(
+        hourly_statistics=True,
+        data={
+            "electricity_by_prm": {
+                "PRM1": {"readings": readings, "load_curve": load_curve}
+            },
+            "agreements": [],
+            "gas": [],
+            "supply_points": {"gas": []},
+        },
+    )
+    return OctopusStatisticsImporter(MagicMock(), coordinator)
+
+
+@pytest.mark.usefixtures("paris_tz")
+def test_spread_follows_the_load_curve() -> None:
+    """La valeur du jour est répartie au prorata de la courbe, total inchangé."""
+    hourly = spread_daily_over_hours(
+        {_paris_day(15): 10.0},
+        load_curve_by_day(_curve("2026-06-15", {7: 1.0, 19: 3.0})),
+    )
+
+    assert len(hourly) == 24
+    assert hourly[datetime(2026, 6, 15, 7, tzinfo=PARIS)] == pytest.approx(2.5)
+    assert hourly[datetime(2026, 6, 15, 19, tzinfo=PARIS)] == pytest.approx(7.5)
+    assert sum(hourly.values()) == pytest.approx(10.0)
+
+
+@pytest.mark.usefixtures("paris_tz")
+def test_spread_keeps_both_hours_of_the_autumn_dst_change() -> None:
+    """
+    25/10/2026 : 2h-3h existe deux fois, le jour compte 25 heures.
+
+    Les heures sont clés en UTC : les deux 2h locales restent distinctes au
+    lieu de se fusionner (bug de MyElectricalData sur ce même jour).
+    """
+    curve = [
+        {"startAt": "2026-10-25T02:00:00+02:00", "value": 1.0},
+        {"startAt": "2026-10-25T02:00:00+01:00", "value": 3.0},
+    ]
+    hourly = spread_daily_over_hours(
+        {datetime(2026, 10, 25, tzinfo=PARIS): 8.0}, load_curve_by_day(curve)
+    )
+
+    assert len(hourly) == 25
+    assert hourly[datetime(2026, 10, 25, 0, tzinfo=dt_util.UTC)] == pytest.approx(2.0)
+    assert hourly[datetime(2026, 10, 25, 1, tzinfo=dt_util.UTC)] == pytest.approx(6.0)
+    assert sum(hourly.values()) == pytest.approx(8.0)
+
+
+@pytest.mark.usefixtures("paris_tz")
+def test_spread_spring_dst_day_has_23_hours() -> None:
+    """29/03/2026 : 2h-3h n'existe pas, le jour compte 23 heures."""
+    hourly = spread_daily_over_hours({datetime(2026, 3, 29, tzinfo=PARIS): 5.0}, {})
+
+    assert len(hourly) == 23
+
+
+@pytest.mark.usefixtures("paris_tz")
+def test_day_without_curve_stays_on_its_first_hour() -> None:
+    """Sans courbe, le jour garde sa valeur sur 0h et des zéros ailleurs."""
+    hourly = spread_daily_over_hours({_paris_day(15): 10.0}, {})
+
+    assert hourly[_paris_day(15)] == 10.0
+    assert sum(hourly.values()) == 10.0
+    assert len(hourly) == 24
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("paris_tz")
+async def test_hourly_import_keeps_daily_totals() -> None:
+    """En mode horaire, la conso de chaque jour reste celle du relevé journalier."""
+    store = _FakeStatsStore()
+    readings = [
+        _reading("2026-06-15T00:00:00+02:00", 10.0),
+        _reading("2026-06-16T00:00:00+02:00", 4.0),
+    ]
+    curve = _curve("2026-06-15", {7: 1.0, 19: 3.0}) + _curve("2026-06-16", {12: 1.0})
+
+    await _run_import(_make_hourly_importer(readings, curve), store)
+
+    changes = store.changes(STAT_ID)
+    assert len(changes) == 48
+    assert sum(changes[:24]) == pytest.approx(10.0)
+    assert sum(changes[24:]) == pytest.approx(4.0)
+    assert changes[7] == pytest.approx(2.5)
+    assert changes[24 + 12] == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("paris_tz")
+async def test_switching_to_hourly_does_not_double_count() -> None:
+    """
+    Passer en horaire réécrit les jours déjà importés au jour près.
+
+    La ligne de minuit du jour est remplacée par la valeur de 0h : la somme
+    reste juste, sans compter le jour deux fois.
+    """
+    store = _FakeStatsStore()
+    readings = [
+        _reading("2026-06-14T00:00:00+02:00", 5.0),
+        _reading("2026-06-15T00:00:00+02:00", 10.0),
+    ]
+    await _run_import(_make_importer(readings), store)
+
+    curve = _curve("2026-06-14", {0: 1.0, 8: 1.0}) + _curve("2026-06-15", {9: 1.0})
+    await _run_import(_make_hourly_importer(readings, curve), store)
+
+    assert sum(store.changes(STAT_ID)) == pytest.approx(15.0)
+    assert store.states(STAT_ID)[0] == pytest.approx(2.5)

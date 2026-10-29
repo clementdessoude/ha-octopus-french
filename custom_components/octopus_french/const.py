@@ -5,6 +5,11 @@ DOMAIN = "octopus_french"
 CONF_ACCOUNT_NUMBER = "account_number"
 CONF_REFRESH_TOKEN = "refresh_token"
 CONF_REFRESH_TOKEN_EXPIRY = "refresh_token_expiry"
+CONF_HOURLY_STATISTICS = "hourly_statistics"
+
+# Courbe de charge Enedis (demi-heure), utilisée pour répartir les totaux
+# journaliers heure par heure dans les statistiques.
+LOAD_CURVE_FREQUENCY = "THIRTY_MIN_INTERVAL"
 
 LEDGER_TYPE_ELECTRICITY = "FRA_ELECTRICITY_LEDGER"
 LEDGER_TYPE_GAS = "FRA_GAS_LEDGER"

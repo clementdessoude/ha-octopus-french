@@ -4,9 +4,17 @@ from contextlib import AbstractContextManager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from homeassistant.components.recorder import Recorder
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.octopus_french.config_flow import OctopusFrenchConfigFlow
-from custom_components.octopus_french.const import CONF_ACCOUNT_NUMBER
+from custom_components.octopus_french.const import (
+    CONF_ACCOUNT_NUMBER,
+    CONF_HOURLY_STATISTICS,
+    DOMAIN,
+)
 from custom_components.octopus_french.octopus_french import (
     OctopusAuthError,
     OctopusConnectionError,
@@ -246,3 +254,21 @@ async def test_reauth_confirm_purges_persisted_refresh_token(
     assert new_data["password"] == "new-pw"
     assert "refresh_token" not in new_data
     assert "refresh_token_expiry" not in new_data
+
+
+async def test_options_flow_enables_hourly_statistics(
+    hass: HomeAssistant, recorder_mock: Recorder
+) -> None:
+    """Le formulaire d'options active les statistiques horaires (désactivées par défaut)."""
+    entry = MockConfigEntry(domain=DOMAIN, data={}, options={})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "init"
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_HOURLY_STATISTICS: True}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_HOURLY_STATISTICS: True}

@@ -26,8 +26,10 @@ from .utils import (
     gas_daily_values,
     get_tariff_rate_for_key,
     is_tempo_contract,
+    load_curve_by_day,
     normalize_consumption_label,
     reading_local_day,
+    spread_daily_over_hours,
 )
 
 if TYPE_CHECKING:
@@ -158,6 +160,16 @@ class OctopusStatisticsImporter:
         rate = rates[cost_key]
         return float(value) * rate if rate else None
 
+    def _electricity_series(
+        self,
+        values: dict[datetime, float],
+        load_curve: list[dict[str, Any]] | None,
+    ) -> dict[datetime, float]:
+        """Return the series to import: daily, or spread hourly on the curve."""
+        if not self.coordinator.hourly_statistics:
+            return values
+        return spread_daily_over_hours(values, load_curve_by_day(load_curve or []))
+
     async def _async_import_electricity(self) -> None:
         """Import electricity statistics for every PRM."""
         data = self.coordinator.data or {}
@@ -177,7 +189,9 @@ class OctopusStatisticsImporter:
                     name=f"Octopus Energy {key}",
                     unit_class="energy" if is_energy else None,
                     unit=UnitOfEnergy.KILO_WATT_HOUR if is_energy else CURRENCY_EURO,
-                    daily_values=values,
+                    daily_values=self._electricity_series(
+                        values, prm_data.get("load_curve")
+                    ),
                 )
 
     async def _async_import_gas(self) -> None:
@@ -256,6 +270,17 @@ class OctopusStatisticsImporter:
                 f"{end:%Y-%m-%d}",
             )
 
+            load_curve = (
+                await self.coordinator.async_get_load_curve(
+                    meter.get("property_id") or data["account_id"],
+                    meter_prm,
+                    start_date.isoformat(),
+                    end.isoformat(),
+                )
+                if self.coordinator.hourly_statistics
+                else None
+            )
+
             daily_values = self._collect_electricity_daily_values(
                 data, meter_prm, readings
             )
@@ -269,7 +294,7 @@ class OctopusStatisticsImporter:
                     name=f"Octopus Energy {key}",
                     unit_class="energy" if is_energy else None,
                     unit=UnitOfEnergy.KILO_WATT_HOUR if is_energy else CURRENCY_EURO,
-                    daily_values=values,
+                    daily_values=self._electricity_series(values, load_curve),
                 )
                 imported[statistic_id] = len(values)
 
@@ -325,7 +350,7 @@ class OctopusStatisticsImporter:
         unit: str,
         daily_values: dict[datetime, float],
     ) -> None:
-        """Import one statistic series."""
+        """Import one statistic series, of daily or hourly values."""
         if not daily_values:
             _LOGGER.debug("Nothing to import for %s: empty series", statistic_id)
             return
@@ -337,7 +362,10 @@ class OctopusStatisticsImporter:
         days = sorted(daily_values)
         statistics: list[StatisticData] = []
 
-        contiguous = bool(days) and len(days) == (days[-1] - days[0]).days + 1
+        # Contiguity is judged on calendar days so that an hourly series (one
+        # value per hour, 23 to 25 per day) is treated like a daily one.
+        dates = sorted({dt_util.as_local(day).date() for day in days})
+        contiguous = bool(dates) and len(dates) == (dates[-1] - dates[0]).days + 1
 
         if contiguous:
             cumulative_sum = await self._async_get_anchor_sum(statistic_id, days[0])
@@ -365,7 +393,7 @@ class OctopusStatisticsImporter:
                 statistics.append(
                     StatisticData(start=day, state=reading_value, sum=cumulative_sum)
                 )
-                self.last_imported[statistic_id] = day.isoformat()
+                self.last_imported[statistic_id] = dt_util.as_local(day).isoformat()
         else:
             for day in days:
                 if last_imported_day is not None and day <= last_imported_day:
@@ -375,7 +403,7 @@ class OctopusStatisticsImporter:
                 statistics.append(
                     StatisticData(start=day, state=reading_value, sum=cumulative_sum)
                 )
-                self.last_imported[statistic_id] = day.isoformat()
+                self.last_imported[statistic_id] = dt_util.as_local(day).isoformat()
 
         if not statistics:
             _LOGGER.debug("No new statistics to import for %s", statistic_id)

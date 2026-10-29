@@ -479,6 +479,19 @@ L'intégration importe automatiquement l'historique de vos consommations et coû
 - **Coûts basés sur les montants réels de l'API** (exacts même après un changement de tarif)
 - **Compatible** avec le tableau de bord Énergie
 
+### ⏱️ Statistiques horaires (courbe de charge)
+
+Par défaut, chaque jour est importé d'un bloc à minuit : la vue « jour » du tableau Énergie place alors toute la consommation sur la première heure, et la consommation des appareils suivis apparaît en « consommation non suivie ».
+
+Si la collecte de la **courbe de charge** est activée dans votre espace Enedis (consommation horaire : enregistrement et collecte), activez l'option **Statistiques horaires** (**Paramètres** → **Appareils et services** → **Octopus Energy France** → **Configurer**). Chaque jour est alors réparti heure par heure d'après la courbe à la demi-heure :
+
+- Les **totaux journaliers ne changent pas** : consommation, coûts réels et répartition HP/HC/Tempo restent ceux des relevés journaliers, la courbe ne donne que la forme de la journée.
+- Les **changements d'heure** sont gérés (journées de 23 et 25 heures).
+- Un jour sans courbe disponible reste importé d'un bloc à minuit.
+- La courbe n'est téléchargée qu'une fois par nouveau relevé journalier.
+
+Désactiver l'option n'efface pas les heures déjà importées. Pour repartir de statistiques purement journalières, supprimez les séries `octopus_french:…_energy_*` / `…_cost_*` dans **Outils de développement** → **Statistiques**, puis lancez le service **Recalculer les statistiques** depuis le début de votre contrat.
+
 ### Instructions de configuration
 
 1. Allez dans **Paramètres** → **Tableaux de bord** → **Énergie**

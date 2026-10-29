@@ -45,6 +45,19 @@
       "reauth_successful": "La ré-authentification a réussi"
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options",
+        "data": {
+          "hourly_statistics": "Statistiques horaires (courbe de charge)"
+        },
+        "data_description": {
+          "hourly_statistics": "Répartit la consommation et le coût de chaque jour heure par heure dans le tableau de bord Énergie, d'après la courbe de charge à la demi-heure. Nécessite la collecte de la courbe de charge activée dans votre espace Enedis."
+        }
+      }
+    }
+  },
   "entity": {
     "sensor": {
       "energy_base": {

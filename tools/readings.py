@@ -201,6 +201,11 @@ def main() -> None:
         "--days", type=int, default=30, help="Nombre de jours (défaut: 30)"
     )
     parser.add_argument(
+        "--frequency",
+        default="DAY_INTERVAL",
+        help="readingFrequencyType (ex: DAY_INTERVAL, HALF_HOUR_INTERVAL, HOUR_INTERVAL)",
+    )
+    parser.add_argument(
         "--raw", action="store_true", help="Affiche le JSON brut complet"
     )
     args = parser.parse_args()
@@ -244,7 +249,7 @@ def main() -> None:
             "startAt": start_at,
             "endAt": end_at,
             "utilityFilters": [
-                {"electricityFilters": {"readingFrequencyType": "DAY_INTERVAL"}}
+                {"electricityFilters": {"readingFrequencyType": args.frequency}}
             ],
             "first": 100,
             "after": after,
